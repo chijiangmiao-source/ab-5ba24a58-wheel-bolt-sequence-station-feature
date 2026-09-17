@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>轮毂复核工位</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main class="panel">
+  <header class="topbar">
+    <h1>轮毂复核工位</h1>
+    <div class="session-bar">
+      <span>会话：<code id="session-id">—</code></span>
+      <span id="progress-text"></span>
+      <button id="btn-new" type="button">开始新会话</button>
+      <button id="btn-refresh" type="button">刷新进度</button>
+    </div>
+  </header>
+
+  <p id="start-hint" class="hint" hidden>尚未开始会话，请点击「开始新会话」。复核顺序固定为 A1 → B2 → A3 → B1 → A2 → B3。</p>
+
+  <ol id="bolt-list" class="bolts"></ol>
+
+  <section id="work-panel" class="work" hidden>
+    <p class="current">
+      当前螺栓：<strong id="current-position" class="position"></strong>
+      <span class="step">（第 <span id="current-seq"></span> / 6 步）</span>
+    </p>
+    <label class="field">
+      扭矩（cN·m，合格范围 4200–4800，含边界）
+      <input id="torque-input" type="number" step="1" min="4200" max="4800"
+             inputmode="numeric" autocomplete="off" placeholder="例如 4500">
+    </label>
+    <button id="btn-submit" type="button">确认复核</button>
+  </section>
+
+  <p id="notice" class="notice" role="status"></p>
+  <p id="error" class="error" role="alert"></p>
+
+  <section id="done-banner" class="done" hidden>
+    <h2>轮毂复核完成</h2>
+    <table id="confirm-table">
+      <thead>
+        <tr><th>序号</th><th>位置</th><th>扭矩 (cN·m)</th><th>确认时间</th><th>幂等键</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
