@@ -3,6 +3,10 @@
 
 CREATE TABLE sessions (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- 可选绑定的轮毂工单码（接口按去除首尾空白后的非空值保存）；
+  -- NULL 表示未绑定，历史记录无需补值
+  work_order_code   TEXT
+                    CHECK (work_order_code IS NULL OR btrim(work_order_code) <> ''),
   status            TEXT NOT NULL DEFAULT 'in_progress'
                     CHECK (status IN ('in_progress', 'completed')),
   -- 下一个期待的序号（从 1 开始）；六步全部确认后为 7，仅服务端可推进
@@ -11,6 +15,12 @@ CREATE TABLE sessions (
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 非空工单码全局唯一：同一工单码至多绑定一个会话，
+-- 两个终端并发打开同一码时由该约束兜底，只能得到同一会话
+CREATE UNIQUE INDEX sessions_work_order_code_key
+  ON sessions (work_order_code)
+  WHERE work_order_code IS NOT NULL;
 
 CREATE TABLE confirmations (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

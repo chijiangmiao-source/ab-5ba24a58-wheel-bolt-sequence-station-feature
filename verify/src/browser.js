@@ -152,6 +152,89 @@ export async function runBrowser(webBase, apiBase, t) {
       assert(await page.isHidden('#work-panel'), '完成后不应再显示提交表单');
       await page.close();
     });
+
+    await t.test('工单码首开从第一颗开始，完成两步后另一浏览器按同码接续第三颗', async () => {
+      const code = `WO-${Date.now()}-X`;
+      const page1 = await browser.newPage();
+      page1.setDefaultTimeout(20000);
+      await page1.goto(`${webBase}/`);
+      await page1.fill('#work-order-input', code);
+      await page1.click('#btn-open');
+      await page1.waitForSelector('#work-panel:not([hidden])');
+      assertEqual(await currentPosition(page1), 'A1', '首开应从 A1 开始');
+      assertEqual(
+        (await page1.textContent('#work-order-code')).trim(),
+        code,
+        '会话栏应显示工单码',
+      );
+      await confirmCurrent(page1, 4500);
+      await page1.waitForFunction(
+        () => document.getElementById('current-position').textContent.trim() === 'B2',
+      );
+      await confirmCurrent(page1, 4600);
+      await page1.waitForFunction(
+        () => document.getElementById('current-position').textContent.trim() === 'A3',
+      );
+
+      // 另一浏览器（全新上下文，无本地会话）输入同一码
+      const page2 = await browser.newPage();
+      page2.setDefaultTimeout(20000);
+      await page2.goto(`${webBase}/`);
+      await page2.fill('#work-order-input', `  ${code}  `); // 首尾空白由服务端去除
+      await page2.click('#btn-open');
+      await page2.waitForSelector('#work-panel:not([hidden])');
+      assertEqual(await currentPosition(page2), 'A3', '应接续第三颗');
+      assertEqual(await page2.locator('#bolt-list li.done').count(), 2, '应有两颗已确认');
+      const id1 = await page1.evaluate((k) => localStorage.getItem(k), 'hub_review.session_id');
+      const id2 = await page2.evaluate((k) => localStorage.getItem(k), 'hub_review.session_id');
+      assert(id1 && id1 === id2, '两个终端应得到同一会话');
+      await page1.close();
+      await page2.close();
+    });
+
+    await t.test('非法工单码：停留在进入区并显示原因', async () => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(20000);
+      await page.goto(`${webBase}/`);
+      await page.fill('#work-order-input', 'BAD CODE!');
+      await page.click('#btn-open');
+      await page.waitForFunction(
+        () => document.getElementById('entry-error').textContent.length > 0,
+      );
+      assert(await page.isHidden('#work-panel'), '非法工单码不应进入复核区');
+      const sid = await page.evaluate((k) => localStorage.getItem(k), 'hub_review.session_id');
+      assertEqual(sid, null, '不应产生本地会话');
+      // 仅空白同样停留在进入区并提示
+      await page.fill('#work-order-input', '   ');
+      await page.click('#btn-open');
+      await page.waitForFunction(
+        () => document.getElementById('entry-error').textContent.includes('工单码'),
+      );
+      assert(await page.isHidden('#work-panel'), '空白工单码不应进入复核区');
+      await page.close();
+    });
+
+    await t.test('打开工单暂时失败时不覆盖本地已有会话', async () => {
+      const page = await newSessionPage();
+      await confirmCurrent(page, 4500);
+      await page.waitForFunction(
+        () => document.getElementById('current-position').textContent.trim() === 'B2',
+      );
+      const before = await page.evaluate((k) => localStorage.getItem(k), 'hub_review.session_id');
+      // 模拟工单接口网络故障
+      await page.route('**/api/work-orders/**', (route) => route.abort());
+      await page.fill('#work-order-input', 'WO-UNREACHABLE-1');
+      await page.click('#btn-open');
+      await page.waitForFunction(
+        () => document.getElementById('entry-error').textContent.length > 0,
+      );
+      const after = await page.evaluate((k) => localStorage.getItem(k), 'hub_review.session_id');
+      assertEqual(after, before, '暂时失败不应覆盖本地会话');
+      assertEqual(await currentPosition(page), 'B2', '仍停留在原进度');
+      const st = await serverState(page);
+      assertEqual(st.confirmed_count, 1, '服务端进度不变');
+      await page.close();
+    });
   } finally {
     await browser.close();
   }

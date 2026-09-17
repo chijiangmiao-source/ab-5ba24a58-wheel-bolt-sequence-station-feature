@@ -7,6 +7,8 @@ import {
   TORQUE_MIN,
   TORQUE_MAX,
   IDEMPOTENCY_KEY_MAX_LENGTH,
+  WORK_ORDER_CODE_MAX_LENGTH,
+  WORK_ORDER_CODE_RE,
 } from './constants.js';
 
 const UUID_RE =
@@ -48,6 +50,7 @@ function progressOf(session) {
 function sessionView(session, confirmations) {
   return {
     session_id: session.id,
+    work_order_code: session.work_order_code ?? null,
     created_at: session.created_at,
     positions: POSITIONS,
     torque_range: { min: TORQUE_MIN, max: TORQUE_MAX, unit: 'cN·m' },
@@ -78,16 +81,65 @@ export function createApp() {
     }
   });
 
-  // 开始新会话：固定 A1 → B2 → A3 → B1 → A2 → B3
+  // 开始新会话：固定 A1 → B2 → A3 → B1 → A2 → B3（不绑定工单码的旧入口，保持可用）
   app.post('/api/sessions', async (req, res, next) => {
     try {
       const { rows } = await pool.query(
         `INSERT INTO sessions DEFAULT VALUES
-         RETURNING id, status, expected_sequence, created_at`,
+         RETURNING id, work_order_code, status, expected_sequence, created_at`,
       );
       res.status(201).json(sessionView(rows[0], []));
     } catch (err) {
       next(err);
+    }
+  });
+
+  // 按工单码打开复核：同一事务内已绑定则返回原会话（200），尚未绑定才创建（201）。
+  // 工单码按去除首尾空白后的值校验并保存；并发首开由唯一约束 + ON CONFLICT 兜底，
+  // 两个终端只能得到同一会话。
+  app.post('/api/work-orders/:code/session', async (req, res, next) => {
+    const client = await pool.connect();
+    try {
+      const code = String(req.params.code ?? '').trim();
+      if (code.length === 0) {
+        throw new ApiError(400, 'invalid_work_order_code', '工单码不能为空');
+      }
+      if (code.length > WORK_ORDER_CODE_MAX_LENGTH || !WORK_ORDER_CODE_RE.test(code)) {
+        throw new ApiError(
+          400,
+          'invalid_work_order_code',
+          `工单码须为 1–${WORK_ORDER_CODE_MAX_LENGTH} 个字符（字母、数字及 - _ .），不含空白`,
+        );
+      }
+
+      await client.query('BEGIN');
+      // 已绑定则跳过插入；并发首开时等待对方事务落定，保证只产生一个会话
+      const ins = await client.query(
+        `INSERT INTO sessions (work_order_code) VALUES ($1)
+         ON CONFLICT (work_order_code) WHERE work_order_code IS NOT NULL DO NOTHING
+         RETURNING *`,
+        [code],
+      );
+      let session = ins.rows[0];
+      const created = ins.rowCount === 1;
+      if (!created) {
+        const sel = await client.query(
+          'SELECT * FROM sessions WHERE work_order_code = $1',
+          [code],
+        );
+        session = sel.rows[0];
+      }
+      const c = await client.query(
+        'SELECT * FROM confirmations WHERE session_id = $1 ORDER BY sequence',
+        [session.id],
+      );
+      await client.query('COMMIT');
+      res.status(created ? 201 : 200).json(sessionView(session, c.rows));
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
     }
   });
 

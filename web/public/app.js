@@ -21,6 +21,7 @@ const state = {
   sessionId: localStorage.getItem(SESSION_KEY),
   view: null, // 服务端权威进度
   busy: false, // 是否有提交在途（含自动重试）
+  opening: false, // 是否有「打开复核」请求在途
 };
 
 function uuid() {
@@ -43,6 +44,10 @@ function showNotice(msg) {
 
 function showError(msg) {
   $('error').textContent = msg || '';
+}
+
+function showEntryError(msg) {
+  $('entry-error').textContent = msg || '';
 }
 
 function clearMessages() {
@@ -82,8 +87,9 @@ async function refresh() {
 }
 
 async function startSession() {
-  if (state.busy) return;
+  if (state.busy || state.opening) return;
   clearMessages();
+  showEntryError('');
   try {
     const { status, body } = await fetchJson('/sessions', { method: 'POST' });
     if (status !== 201) throw new Error(`HTTP ${status}`);
@@ -96,6 +102,53 @@ async function startSession() {
     showError('创建会话失败，请重试');
   }
   render();
+}
+
+/**
+ * 以工单码打开复核：服务端在同一事务内返回已绑定会话，未绑定才创建。
+ * 非法工单码停留在进入区并显示原因；查询/创建暂时失败时不覆盖本地已有会话。
+ */
+async function openWorkOrder() {
+  if (state.busy || state.opening) return;
+  const code = $('work-order-input').value.trim();
+  showEntryError('');
+  if (code === '') {
+    showEntryError('请输入或扫描工单码');
+    return;
+  }
+
+  state.opening = true;
+  render();
+  try {
+    const { status, body } = await fetchJson(
+      `/work-orders/${encodeURIComponent(code)}/session`,
+      { method: 'POST' },
+    );
+    if (status === 200 || status === 201) {
+      state.sessionId = body.session_id;
+      localStorage.setItem(SESSION_KEY, state.sessionId);
+      state.view = body;
+      $('torque-input').value = '';
+      $('work-order-input').value = '';
+      clearMessages();
+      showNotice(
+        status === 201
+          ? `工单 ${body.work_order_code} 已绑定新会话，请从第一颗开始复核`
+          : `已接入工单 ${body.work_order_code} 的复核（已确认 ${body.confirmed_count} / 6）`,
+      );
+    } else if (status === 400) {
+      // 非法工单码：停留在进入区，展示服务端给出的原因，不影响已有会话
+      showEntryError((body && body.error && body.error.message) || '工单码非法');
+    } else {
+      // 暂时失败：不覆盖本地已有会话
+      showEntryError('暂时无法打开该工单，请稍后重试；当前会话不受影响');
+    }
+  } catch {
+    showEntryError('网络异常，未能打开工单；当前会话不受影响');
+  } finally {
+    state.opening = false;
+    render();
+  }
 }
 
 /** 提交当前螺栓的复核确认；网络异常时以同一幂等键自动重试。 */
@@ -166,6 +219,7 @@ async function submitConfirmation() {
 function render() {
   const view = state.view;
 
+  $('work-order-code').textContent = (view && view.work_order_code) || '—';
   $('session-id').textContent = state.sessionId ? state.sessionId.slice(0, 8) : '—';
   $('session-id').title = state.sessionId || '';
   $('start-hint').hidden = Boolean(view);
@@ -228,12 +282,19 @@ function render() {
   $('btn-submit').disabled = state.busy || !inProgress;
   $('torque-input').disabled = state.busy || !inProgress;
   $('btn-refresh').disabled = state.busy;
+  $('btn-new').disabled = state.busy || state.opening;
+  $('btn-open').disabled = state.busy || state.opening;
+  $('work-order-input').disabled = state.opening;
 }
 
 window.addEventListener('DOMContentLoaded', () => {
   $('btn-new').addEventListener('click', startSession);
+  $('btn-open').addEventListener('click', openWorkOrder);
   $('btn-refresh').addEventListener('click', refresh);
   $('btn-submit').addEventListener('click', submitConfirmation);
+  $('work-order-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') openWorkOrder();
+  });
   $('torque-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') submitConfirmation();
   });

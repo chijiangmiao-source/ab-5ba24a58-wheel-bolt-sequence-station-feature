@@ -28,6 +28,25 @@ async function postConf(base, sid, payload) {
   return { status: r.status, body: await r.json() };
 }
 
+async function openWorkOrder(base, code) {
+  const r = await fetch(`${base}/api/work-orders/${encodeURIComponent(code)}/session`, {
+    method: 'POST',
+  });
+  return { status: r.status, body: await r.json() };
+}
+
+async function withDb(fn) {
+  const client = new pg.Client({
+    connectionString: process.env.DATABASE_URL || 'postgres://hub:hub@db:5432/hub_review',
+  });
+  await client.connect();
+  try {
+    await fn(client);
+  } finally {
+    await client.end();
+  }
+}
+
 /** 协议测试：直接针对 API 的 HTTP 语义。 */
 export async function runProtocol(base, t) {
   await t.test('健康检查返回 200', async () => {
@@ -193,5 +212,133 @@ export async function runProtocol(base, t) {
     }
     const st = await getSession(base, s.session_id);
     assertEqual(st.confirmations[0].torque, 4500, '原始扭矩未被篡改');
+  });
+
+  await t.test('工单首开创建会话并从第一颗开始，重复打开返回同一会话', async () => {
+    const code = key('wo-open');
+    const first = await openWorkOrder(base, code);
+    assertEqual(first.status, 201, '首开应创建会话');
+    assertEqual(first.body.work_order_code, code, '应保存工单码');
+    assertEqual(first.body.expected_sequence, 1, '首开期待序号为 1');
+    assertEqual(first.body.expected_position, 'A1', '首开从第一颗开始');
+    assertEqual(first.body.confirmed_count, 0, '首开无确认记录');
+
+    const again = await openWorkOrder(base, code);
+    assertEqual(again.status, 200, '重复打开应返回已绑定会话');
+    assertEqual(again.body.session_id, first.body.session_id, '同一工单码同一会话');
+
+    // 首尾空白不影响命中：按去除空白后的值保存与查找
+    const padded = await openWorkOrder(base, `  ${code}  `);
+    assertEqual(padded.status, 200, '带空白应命中同一会话');
+    assertEqual(padded.body.session_id, first.body.session_id, '去空白后同一会话');
+    assertEqual(padded.body.work_order_code, code, '保存的是去空白后的值');
+  });
+
+  await t.test('工单会话跨端接续：完成两步后按码进入直接到第三颗', async () => {
+    const code = key('wo-resume');
+    const first = await openWorkOrder(base, code);
+    assertEqual(first.status, 201);
+    const sid = first.body.session_id;
+    for (let i = 0; i < 2; i += 1) {
+      const rc = await postConf(base, sid, {
+        sequence: i + 1,
+        position: POSITIONS[i],
+        torque: 4500,
+        idempotency_key: key('wo-resume-c'),
+      });
+      assertEqual(rc.status, 201, `第 ${i + 1} 步状态码`);
+    }
+    const again = await openWorkOrder(base, code);
+    assertEqual(again.status, 200, '再次打开应返回已绑定会话');
+    assertEqual(again.body.session_id, sid, '跨端进入为同一会话');
+    assertEqual(again.body.confirmed_count, 2, '权威进度为两颗');
+    assertEqual(again.body.expected_sequence, 3, '接续第三颗');
+    assertEqual(again.body.expected_position, 'A3', '第三颗位置');
+    assertEqual(again.body.confirmations.length, 2, '返回已有确认事件');
+
+    const st = await getSession(base, sid);
+    assertEqual(st.work_order_code, code, '按编号读取同样返回工单码');
+  });
+
+  await t.test('并发首开同一工单码：只产生一个会话', async () => {
+    const code = key('wo-race');
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => openWorkOrder(base, code)),
+    );
+    const ids = new Set(results.map((r) => r.body.session_id));
+    assertEqual(ids.size, 1, '并发首开只能得到同一会话');
+    const created = results.filter((r) => r.status === 201).length;
+    assertEqual(created, 1, '并发首开只有一次创建（201），其余为返回已有（200）');
+    await withDb(async (db) => {
+      const { rows } = await db.query(
+        'SELECT count(*)::int AS n FROM sessions WHERE work_order_code = $1',
+        [code],
+      );
+      assertEqual(rows[0].n, 1, '数据库中该工单码只有一条会话');
+    });
+  });
+
+  await t.test('非法工单码：400 与可直接展示的中文原因', async () => {
+    const bad = [
+      '   ', // 去空白后为空
+      'WO 01', // 含空白
+      'WO!01', // 非法字符
+      '工单001', // 非允许字符集
+      `W${'O'.repeat(64)}`, // 65 字符，超长
+    ];
+    for (const code of bad) {
+      const r = await openWorkOrder(base, code);
+      assertEqual(r.status, 400, `非法工单码 ${JSON.stringify(code)} 状态码`);
+      assertEqual(r.body.error.code, 'invalid_work_order_code', '错误码');
+      assert(
+        typeof r.body.error.message === 'string' && r.body.error.message.length > 0,
+        '应返回可展示的中文原因',
+      );
+    }
+    // 边界：1 与 64 字符的合法码均可首开
+    for (const code of ['A', `W${'O'.repeat(63)}`]) {
+      const r = await openWorkOrder(base, code);
+      assertEqual(r.status, 201, `合法工单码（长度 ${code.length}）状态码`);
+      assertEqual(r.body.work_order_code, code, '按原值保存');
+    }
+  });
+
+  await t.test('数据库对非空工单码强制唯一，历史空值无需补值', async () => {
+    await withDb(async (db) => {
+      const code = key('wo-db');
+      await db.query('INSERT INTO sessions (work_order_code) VALUES ($1)', [code]);
+      await assertRejects(
+        () => db.query('INSERT INTO sessions (work_order_code) VALUES ($1)', [code]),
+        '重复的非空工单码应被唯一约束拒绝',
+      );
+      // 未绑定（NULL）的历史记录可存在多条，不受唯一约束影响
+      await db.query('INSERT INTO sessions (work_order_code) VALUES (NULL)');
+      await db.query('INSERT INTO sessions (work_order_code) VALUES (NULL)');
+      // 空白串被 CHECK 兜底拒绝（接口已按去空白后的值保存）
+      await assertRejects(
+        () => db.query("INSERT INTO sessions (work_order_code) VALUES ('   ')"),
+        '空白工单码应被 CHECK 拒绝',
+      );
+    });
+  });
+
+  await t.test('旧客户端：无请求体创建会话并完成原六步流程', async () => {
+    const r = await fetch(`${base}/api/sessions`, { method: 'POST' });
+    assertEqual(r.status, 201, '旧创建接口状态码');
+    const s = await r.json();
+    assertEqual(s.work_order_code, null, '旧入口不绑定工单码');
+    assertEqual(s.expected_sequence, 1, '旧入口从第一颗开始');
+    for (let i = 0; i < 6; i += 1) {
+      const rc = await postConf(base, s.session_id, {
+        sequence: i + 1,
+        position: POSITIONS[i],
+        torque: 4500,
+        idempotency_key: key('legacy'),
+      });
+      assertEqual(rc.status, 201, `旧客户端第 ${i + 1} 步状态码`);
+    }
+    const st = await getSession(base, s.session_id);
+    assertEqual(st.status, 'completed', '旧客户端六步后完成');
+    assertEqual(st.work_order_code, null, '完成后仍未绑定工单码');
   });
 }

@@ -119,6 +119,31 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
   margin: 8px 0 4px;
 }
 
+.entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 20px;
+  margin: 14px 0 4px;
+  background: #fbfcfd;
+}
+
+.entry .field { margin-bottom: 0; flex: 1 1 320px; }
+.entry .field input { width: 100%; max-width: 360px; }
+
+#btn-open {
+  background: var(--info);
+  border-color: var(--info);
+  color: #fff;
+  padding: 10px 24px;
+}
+#btn-open:hover:not(:disabled) { background: #0a4f92; }
+
+.entry .error { flex-basis: 100%; margin: 0; }
+
 .current { margin: 0 0 14px; font-size: 17px; }
 .position { font-size: 26px; }
 .step { color: var(--muted); font-size: 14px; }
