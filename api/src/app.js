@@ -7,6 +7,8 @@ import {
   TORQUE_MIN,
   TORQUE_MAX,
   IDEMPOTENCY_KEY_MAX_LENGTH,
+  WORK_ORDER_CODE_MAX_LENGTH,
+  WORK_ORDER_CODE_RE,
 } from './constants.js';
 
 const UUID_RE =
@@ -48,12 +50,32 @@ function progressOf(session) {
 function sessionView(session, confirmations) {
   return {
     session_id: session.id,
+    work_order_code: session.work_order_code ?? null,
     created_at: session.created_at,
     positions: POSITIONS,
     torque_range: { min: TORQUE_MIN, max: TORQUE_MAX, unit: 'cN·m' },
     ...progressOf(session),
     confirmations: confirmations.map(confirmationView),
   };
+}
+
+/** 工单码按去除首尾空白后的值校验；合法时返回该值，否则抛 422。 */
+function normalizeWorkOrderCode(raw) {
+  const code = typeof raw === 'string' ? raw.trim() : '';
+  if (code.length === 0) {
+    throw new ApiError(422, 'invalid_work_order_code', '工单码不能为空（去除首尾空白后）');
+  }
+  if (code.length > WORK_ORDER_CODE_MAX_LENGTH) {
+    throw new ApiError(
+      422,
+      'invalid_work_order_code',
+      `工单码长度不能超过 ${WORK_ORDER_CODE_MAX_LENGTH} 个字符`,
+    );
+  }
+  if (!WORK_ORDER_CODE_RE.test(code)) {
+    throw new ApiError(422, 'invalid_work_order_code', '工单码不能包含空白或控制字符');
+  }
+  return code;
 }
 
 export function createApp() {
@@ -88,6 +110,58 @@ export function createApp() {
       res.status(201).json(sessionView(rows[0], []));
     } catch (err) {
       next(err);
+    }
+  });
+
+  // 按工单码打开复核：同一事务内返回已绑定会话，尚未绑定时才创建。
+  // 非空工单码有唯一索引兜底，并发打开同一码只会得到同一会话。
+  app.post('/api/work-orders/:code/session', async (req, res, next) => {
+    const client = await pool.connect();
+    try {
+      const code = normalizeWorkOrderCode(req.params.code);
+
+      await client.query('BEGIN');
+      let session;
+      let created = false;
+      const found = await client.query(
+        'SELECT * FROM sessions WHERE work_order_code = $1',
+        [code],
+      );
+      if (found.rowCount > 0) {
+        session = found.rows[0];
+      } else {
+        // 并发首次打开：唯一索引使一方的插入变为 no-op，随后重读对方已提交的行
+        const ins = await client.query(
+          `INSERT INTO sessions (work_order_code) VALUES ($1)
+           ON CONFLICT (work_order_code) WHERE work_order_code IS NOT NULL DO NOTHING
+           RETURNING *`,
+          [code],
+        );
+        if (ins.rowCount > 0) {
+          session = ins.rows[0];
+          created = true;
+        } else {
+          const again = await client.query(
+            'SELECT * FROM sessions WHERE work_order_code = $1',
+            [code],
+          );
+          if (again.rowCount === 0) {
+            throw new Error('工单会话创建后读取失败');
+          }
+          session = again.rows[0];
+        }
+      }
+      const c = await client.query(
+        'SELECT * FROM confirmations WHERE session_id = $1 ORDER BY sequence',
+        [session.id],
+      );
+      await client.query('COMMIT');
+      res.status(created ? 201 : 200).json({ created, ...sessionView(session, c.rows) });
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      next(err);
+    } finally {
+      client.release();
     }
   });
 

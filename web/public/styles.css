@@ -77,6 +77,41 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .hint { color: var(--muted); }
 
+.entry {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px 20px 8px;
+  margin: 14px 0 4px;
+  background: #fbfcfe;
+}
+
+.entry .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.entry .field { margin-bottom: 8px; }
+
+.entry .field input { width: 300px; }
+
+.entry .divider { color: var(--muted); padding-bottom: 10px; }
+
+#btn-open {
+  background: var(--info);
+  border-color: var(--info);
+  color: #fff;
+  font-size: 16px;
+  padding: 10px 24px;
+  margin-bottom: 8px;
+}
+#btn-open:hover:not(:disabled) { background: #0a4f92; }
+
+#btn-new { margin-bottom: 8px; }
+
+#entry-error { margin: 4px 0 8px; }
+
 .bolts {
   display: flex;
   flex-wrap: wrap;

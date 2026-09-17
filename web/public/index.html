@@ -12,13 +12,28 @@
     <h1>轮毂复核工位</h1>
     <div class="session-bar">
       <span>会话：<code id="session-id">—</code></span>
+      <span>工单：<code id="wo-code">—</code></span>
       <span id="progress-text"></span>
-      <button id="btn-new" type="button">开始新会话</button>
+      <button id="btn-switch" type="button" hidden>打开工单</button>
       <button id="btn-refresh" type="button">刷新进度</button>
     </div>
   </header>
 
-  <p id="start-hint" class="hint" hidden>尚未开始会话，请点击「开始新会话」。复核顺序固定为 A1 → B2 → A3 → B1 → A2 → B3。</p>
+  <section id="entry-panel" class="entry">
+    <div class="row">
+      <label class="field">
+        工单码（输入或扫码后「打开复核」）
+        <input id="work-order-input" type="text" autocomplete="off"
+               placeholder="例如 WO-2026-0917-001">
+      </label>
+      <button id="btn-open" type="button">打开复核</button>
+      <span class="divider">或</span>
+      <button id="btn-new" type="button">开始无工单会话</button>
+    </div>
+    <p id="entry-error" class="error" role="alert"></p>
+  </section>
+
+  <p id="start-hint" class="hint" hidden>尚未进入会话：请在上方进入区输入工单码并「打开复核」，或开始无工单会话。复核顺序固定为 A1 → B2 → A3 → B1 → A2 → B3。</p>
 
   <ol id="bolt-list" class="bolts"></ol>
 

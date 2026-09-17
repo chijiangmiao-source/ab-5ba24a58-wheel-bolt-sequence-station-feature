@@ -17,6 +17,15 @@ export async function runBrowser(webBase, apiBase, t) {
     return page;
   }
 
+  async function openWorkOrderPage(code) {
+    const page = await browser.newPage();
+    page.setDefaultTimeout(20000);
+    await page.goto(`${webBase}/`);
+    await page.fill('#work-order-input', code);
+    await page.click('#btn-open');
+    return page;
+  }
+
   async function confirmCurrent(page, torque) {
     await page.fill('#torque-input', String(torque));
     await page.click('#btn-submit');
@@ -150,6 +159,64 @@ export async function runBrowser(webBase, apiBase, t) {
       await page.reload();
       await page.waitForSelector('#done-banner:not([hidden])');
       assert(await page.isHidden('#work-panel'), '完成后不应再显示提交表单');
+      await page.close();
+    });
+
+    await t.test('工单码进入：新工单从第一颗开始，另一浏览器输入同码接续第三颗', async () => {
+      const code = `WO-WEB-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const pageA = await openWorkOrderPage(code);
+      await pageA.waitForSelector('#work-panel:not([hidden])');
+      assertEqual(await currentPosition(pageA), 'A1', '新工单首次打开应从第一颗 A1 开始');
+      assertEqual(
+        await pageA.locator('#bolt-list li.done').count(),
+        0,
+        '新工单首次打开应无已确认螺栓',
+      );
+      await confirmCurrent(pageA, 4500);
+      await pageA.waitForFunction(
+        () => document.getElementById('current-position').textContent.trim() === 'B2',
+      );
+      await confirmCurrent(pageA, 4600);
+      await pageA.waitForFunction(
+        () => document.getElementById('current-position').textContent.trim() === 'A3',
+      );
+
+      // 另一浏览器（全新上下文，无本地会话）：输入同一工单码接续进度
+      const pageB = await openWorkOrderPage(code);
+      await pageB.waitForSelector('#work-panel:not([hidden])');
+      assertEqual(await currentPosition(pageB), 'A3', '另一浏览器应接续第三颗 A3');
+      assertEqual(
+        await pageB.locator('#bolt-list li.done').count(),
+        2,
+        '另一浏览器应显示两颗已确认',
+      );
+      const stA = await serverState(pageA);
+      const stB = await serverState(pageB);
+      assertEqual(stB.session_id, stA.session_id, '两个终端应接入同一会话');
+      assertEqual(stB.confirmed_count, 2, '服务端权威进度为已确认两颗');
+      assertEqual(stB.work_order_code, code, '会话应绑定该工单码');
+      await pageA.close();
+      await pageB.close();
+    });
+
+    await t.test('非法工单码：页面停留在进入区并显示原因', async () => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(20000);
+      await page.goto(`${webBase}/`);
+      await page.fill('#work-order-input', 'AB CD');
+      await page.click('#btn-open');
+      await page.waitForFunction(
+        () => document.getElementById('entry-error').textContent.includes('空白'),
+      );
+      assert(await page.isVisible('#entry-panel'), '应停留在进入区');
+      assert(await page.isHidden('#work-panel'), '不应进入复核区');
+      await page.fill('#work-order-input', 'A'.repeat(65));
+      await page.click('#btn-open');
+      await page.waitForFunction(
+        () => document.getElementById('entry-error').textContent.includes('64'),
+      );
+      assert(await page.isVisible('#entry-panel'), '超长工单码仍应停留在进入区');
+      assert(await page.isHidden('#work-panel'), '超长工单码不应进入复核区');
       await page.close();
     });
   } finally {

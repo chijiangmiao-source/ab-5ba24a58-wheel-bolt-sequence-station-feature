@@ -3,6 +3,9 @@
 /*
  * 轮毂复核工位页面逻辑。
  *
+ * 进入方式：在进入区输入/扫码工单码后「打开复核」（服务端按码返回或创建会话），
+ * 或开始无工单会话；之后共用同一条六步确认链路。
+ *
  * 重试语义（与 README 一致）：
  * - 每次“用户提交意图”生成一个幂等键；网络异常导致的自动重试复用同一键，
  *   服务端据此去重：同键同载荷返回原确认，同键不同载荷判定冲突。
@@ -20,7 +23,8 @@ const $ = (id) => document.getElementById(id);
 const state = {
   sessionId: localStorage.getItem(SESSION_KEY),
   view: null, // 服务端权威进度
-  busy: false, // 是否有提交在途（含自动重试）
+  busy: false, // 是否有请求在途（确认提交 / 打开工单，含自动重试）
+  entryOpen: !localStorage.getItem(SESSION_KEY), // 进入区是否展开（无会话时默认展开）
 };
 
 function uuid() {
@@ -45,9 +49,14 @@ function showError(msg) {
   $('error').textContent = msg || '';
 }
 
+function showEntryError(msg) {
+  $('entry-error').textContent = msg || '';
+}
+
 function clearMessages() {
   showNotice('');
   showError('');
+  showEntryError('');
 }
 
 async function fetchJson(path, options) {
@@ -69,7 +78,8 @@ async function refresh() {
       localStorage.removeItem(SESSION_KEY);
       state.sessionId = null;
       state.view = null;
-      showNotice('原会话已不存在，请开始新会话');
+      state.entryOpen = true;
+      showNotice('原会话已不存在，请输入工单码重新进入或开始新会话');
     } else if (status === 200) {
       state.view = body;
     } else {
@@ -84,18 +94,68 @@ async function refresh() {
 async function startSession() {
   if (state.busy) return;
   clearMessages();
+  state.busy = true;
+  render();
   try {
     const { status, body } = await fetchJson('/sessions', { method: 'POST' });
     if (status !== 201) throw new Error(`HTTP ${status}`);
     state.sessionId = body.session_id;
     localStorage.setItem(SESSION_KEY, state.sessionId);
     state.view = body;
+    state.entryOpen = false;
     $('torque-input').value = '';
     showNotice('新会话已开始，请按顺序复核六颗螺栓');
   } catch {
-    showError('创建会话失败，请重试');
+    showEntryError('创建会话失败，请重试');
+  } finally {
+    state.busy = false;
+    render();
   }
+}
+
+/**
+ * 以工单码打开复核：服务端返回该码已绑定的会话（未绑定时新建）。
+ * 工单码非法（4xx）时停留在进入区并显示原因；查询/创建暂时失败时不覆盖本地已有会话。
+ */
+async function openWorkOrder() {
+  if (state.busy) return;
+  const code = $('work-order-input').value.trim();
+  clearMessages();
+  if (code === '') {
+    showEntryError('请输入或扫描工单码');
+    return;
+  }
+  state.busy = true;
   render();
+  try {
+    const { status, body } = await fetchJson(
+      `/work-orders/${encodeURIComponent(code)}/session`,
+      { method: 'POST' },
+    );
+    if ((status === 200 || status === 201) && body && body.session_id) {
+      state.sessionId = body.session_id;
+      localStorage.setItem(SESSION_KEY, state.sessionId);
+      state.view = body;
+      state.entryOpen = false;
+      $('torque-input').value = '';
+      showNotice(
+        body.created
+          ? `工单 ${body.work_order_code} 已绑定新会话，请从第一颗螺栓开始复核`
+          : `已接入工单 ${body.work_order_code} 的会话，进度以服务端为准`,
+      );
+    } else if (status >= 400 && status < 500) {
+      // 确定性拒绝（如工单码非法）：停留在进入区，展示服务端原因
+      showEntryError((body && body.error && body.error.message) || '工单码不合法');
+    } else {
+      // 暂时失败：不覆盖本地已有会话
+      showEntryError('暂时无法打开工单，请稍后重试（本地会话保持不变）');
+    }
+  } catch {
+    showEntryError('网络异常，暂时无法打开工单（本地会话保持不变）');
+  } finally {
+    state.busy = false;
+    render();
+  }
 }
 
 /** 提交当前螺栓的复核确认；网络异常时以同一幂等键自动重试。 */
@@ -168,7 +228,15 @@ function render() {
 
   $('session-id').textContent = state.sessionId ? state.sessionId.slice(0, 8) : '—';
   $('session-id').title = state.sessionId || '';
+  $('wo-code').textContent = (view && view.work_order_code) || '—';
   $('start-hint').hidden = Boolean(view);
+
+  // 进入区：无会话时始终展开；有会话时由「打开工单」按钮切换展开/收起
+  $('entry-panel').hidden = !state.entryOpen;
+  $('btn-switch').hidden = !view || state.entryOpen;
+  $('work-order-input').disabled = state.busy;
+  $('btn-open').disabled = state.busy;
+  $('btn-new').disabled = state.busy;
 
   const list = $('bolt-list');
   list.textContent = '';
@@ -232,6 +300,15 @@ function render() {
 
 window.addEventListener('DOMContentLoaded', () => {
   $('btn-new').addEventListener('click', startSession);
+  $('btn-open').addEventListener('click', openWorkOrder);
+  $('work-order-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') openWorkOrder();
+  });
+  $('btn-switch').addEventListener('click', () => {
+    state.entryOpen = true;
+    render();
+    $('work-order-input').focus();
+  });
   $('btn-refresh').addEventListener('click', refresh);
   $('btn-submit').addEventListener('click', submitConfirmation);
   $('torque-input').addEventListener('keydown', (e) => {

@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { pool } from './db.js';
+import { migrate, pool } from './db.js';
 
 const port = Number(process.env.PORT || 3000);
 
@@ -17,6 +17,7 @@ async function waitForDb(attempts = 30) {
 }
 
 await waitForDb();
+await migrate();
 const app = createApp();
 app.listen(port, () => {
   console.log(`轮毂复核 API 已监听 :${port}`);

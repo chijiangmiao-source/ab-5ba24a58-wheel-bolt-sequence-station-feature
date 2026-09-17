@@ -8,9 +8,16 @@ CREATE TABLE sessions (
   -- 下一个期待的序号（从 1 开始）；六步全部确认后为 7，仅服务端可推进
   expected_sequence INTEGER NOT NULL DEFAULT 1
                     CHECK (expected_sequence BETWEEN 1 AND 7),
+  -- 可选的轮毂工单码绑定；未绑定的旧会话为 NULL，无需补值
+  work_order_code   TEXT,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 非空工单码全局唯一：同一工单码只能绑定一个会话（并发打开由 ON CONFLICT 兜底）
+CREATE UNIQUE INDEX sessions_work_order_code_key
+  ON sessions (work_order_code)
+  WHERE work_order_code IS NOT NULL;
 
 CREATE TABLE confirmations (
   id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
